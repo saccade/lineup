@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Written by Claude (Anthropic), 2026-10-07, at doc's request. Not doc's code.
+# Public domain (the Unlicense; see LICENSE).
 """lineup: put several versions of a source tree on one web page.
 
 Each version is a folder or a git ref. The page has a tab per version with a

@@ -60,3 +60,9 @@ This command built the page comparing four versions of the dial code in doc's [o
       --notes v1=./onir_dial_v1/NOTES.md \
       --page Overview=overview.md --shelf Sketches=./sketches \
       --title "onir Dial Versions"
+
+## License
+
+lineup is in the public domain, under the [Unlicense](LICENSE). A model wrote it, so there's no human author with rights worth keeping.
+
+A request, not a condition: please don't do crimes with it.
