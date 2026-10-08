@@ -212,13 +212,14 @@ def unified(a, b, path):
 def marks(old, new):
     """The lines of new that differ from old, and the places where old lines were taken out."""
     a, b = old.splitlines(), new.splitlines()
-    changed, gone = [], []
+    changed, gone, ops = [], [], []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
         if tag in ("replace", "insert"):
             changed.extend(range(j1 + 1, j2 + 1))
         elif tag == "delete":
             gone.append(j1)   # taken out after line j1 of new (0: before its first line)
-    return {"changed": changed, "gone": gone}
+        ops.append([tag[0], i1, i2, j1, j2])   # e(qual), r(eplace), i(nsert), d(elete): old[i1:i2] -> new[j1:j2]
+    return {"changed": changed, "gone": gone, "ops": ops}
 
 
 def commits(base, src):
@@ -432,6 +433,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--cobalt); outlin
 .code tr.gone-before td { box-shadow: inset 0 2px 0 var(--red); }
 .code tr.chg.gone-after td.n, .code tr.chg.gone-before td.n { box-shadow: inset 4px 0 0 var(--cobalt), inset 0 -2px 0 var(--red); }
 .code tr.here td { outline: 2px solid var(--cobalt); outline-offset: -2px; }
+.code tr.was td.c { background: var(--del-bg); }
+.code tr.was td.n { box-shadow: inset 4px 0 0 var(--red); color: var(--red); font-weight: 700; }
 .stops { color: var(--cobalt); font-weight: 600; }
 .code tr.del td.n::after { content: " \2212"; color: var(--red); }
 .code tr.hunk td { color: var(--hunk); background: var(--sheet); font-style: italic; padding-top: 4px; padding-bottom: 4px; }
@@ -460,6 +463,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--cobalt); outlin
 .col .sheethead { display: grid; gap: 2px; }
 .col .who { font-family: var(--display); color: var(--brown); font-weight: 700; }
 .col .code { max-height: 75vh; overflow: auto; }
+.cols .refcol { position: sticky; left: 0; z-index: 2; box-shadow: 8px 0 10px -8px rgba(0, 0, 0, 0.35); }
 .empty { color: var(--muted); padding: 14px; font-style: italic; }
 footer { color: var(--muted); font-size: 0.8rem; }
 
@@ -469,6 +473,7 @@ footer { color: var(--muted); font-size: 0.8rem; }
   .drawer { position: static; max-height: none; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); }
   .drawer .group { grid-column: 1 / -1; }
   .cols { grid-auto-columns: minmax(85vw, 1fr); }
+  .cols .refcol { position: static; box-shadow: none; }
   .prose { padding: 14px; }
 }
 </style>
@@ -538,26 +543,40 @@ function codeTable(text, lang, mk) {
   });
   return $("div", { class: "code" }, $("table", {}, tb));
 }
-// the first row of each change: a run of highlighted lines, or a place where lines were taken out
-function stops(box) {
-  const rows = [...box.querySelectorAll("tr")], out = [];
-  rows.forEach((r, i) => {
-    const chg = r.classList.contains("chg"), prev = i > 0 && rows[i - 1].classList.contains("chg");
-    if ((chg && !prev) || r.classList.contains("gone-before") || (r.classList.contains("gone-after") && !chg)) out.push(r);
-  });
-  return out;
+// each change, with its line here, its line in the reference, and the reference lines it replaced or took out
+function blocks(mk) {
+  if (!mk || !mk.ops) return [];
+  return mk.ops.filter(o => o[0] !== "e").map(([t, i1, i2, j1, j2]) => ({
+    added: t === "i",
+    self: t === "d" ? Math.max(j1, 1) : j1 + 1,
+    ref: t === "i" ? Math.max(i1, 1) : i1 + 1,
+    was: t === "i" ? null : [i1 + 1, i2],
+  }));
 }
-// "3 changes", and buttons that step through them
-function stepper(box) {
-  const list = stops(box);
+// where a reference line sits in this file
+function placeOf(mk, line) {
+  let last = 1;
+  for (const [t, i1, i2, j1, j2] of mk.ops) {
+    if (i1 <= line - 1 && line - 1 < i2) return t === "e" ? j1 + (line - 1 - i1) + 1 : j1 + 1;
+    last = Math.max(j2, 1);
+  }
+  return last;
+}
+const rowsOf = box => box.querySelectorAll("tbody tr");
+const rowAt = (box, n) => { const rows = rowsOf(box); return rows[Math.max(1, Math.min(n, rows.length)) - 1]; };
+// scroll a code box so a row sits `off` pixels below the box's top, as near as the box allows;
+// returns where the row ends up
+function park(box, row, off) {
+  const top = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+  const to = Math.max(0, Math.min(top - off, box.scrollHeight - box.clientHeight));
+  box.scrollTo({ top: to, behavior: "smooth" });
+  return top - to;
+}
+// "3 changes", and buttons that step through them; land(change) does the scrolling
+function stepper(list, land) {
   if (!list.length) return null;
   let at = -1;
-  const go = d => {
-    list.forEach(r => r.classList.remove("here"));
-    at = (at + d + list.length) % list.length;
-    list[at].classList.add("here");
-    list[at].scrollIntoView({ block: "center", behavior: "smooth" });
-  };
+  const go = d => { at = (at + d + list.length) % list.length; land(list[at]); };
   return $("span", { class: "tools" },
     $("span", { class: "stops" }, list.length === 1 ? "1 change" : `${list.length} changes`),
     $("button", { class: "chip", title: "previous change", onclick: () => go(-1) }, "↑"),
@@ -602,7 +621,15 @@ function sheet(file, startMode) {
       }
     }
     const code = mode === "diff" && file.diff ? diffTable(file.diff, file.lang) : codeTable(file.text, file.lang, file.marks);
-    if (mode !== "diff") { const s = stepper(code); if (s) tools.prepend(s); }
+    if (mode !== "diff") {
+      const s = stepper(blocks(file.marks), b => {
+        rowsOf(code).forEach(r => r.classList.remove("here"));
+        const r = rowAt(code, b.self);
+        r.classList.add("here");
+        r.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+      if (s) tools.prepend(s);
+    }
     box.replaceChildren(
       $("div", { class: "sheethead" },
         $("div", {}, $("div", { class: "path" }, file.path),
@@ -693,12 +720,33 @@ function compareView() {
   const render = () => {
     bar.replaceChildren(...D.compare.map(c => $("button", { class: "chip", "aria-pressed": String(c.name === pick), onclick: () => { pick = c.name; store.set("compare", pick); render(); } }, c.name)));
     const piece = D.compare.find(c => c.name === pick);
-    cols.replaceChildren(...D.versions.map(v => {
+    const all = D.versions.map(v => {
       const cell = piece.cells[v.id];
-      const code = cell ? codeTable(cell.text, cell.lang, cell.marks) : $("div", { class: "empty" }, "Not in this version.");
-      const step = cell && cell.marks ? stepper(code) : null;
+      return { v, cell, code: cell ? codeTable(cell.text, cell.lang, cell.marks) : null };
+    });
+    const ref = all.find(c => c.v.id === piece.ref);
+    // a step in one column brings every column to the same lines, at the same height
+    const land = me => b => {
+      const shown = all.filter(c => c.code);
+      shown.forEach(c => rowsOf(c.code).forEach(r => r.classList.remove("here", "was")));
+      const box = me.code.getBoundingClientRect();
+      if (box.top < 0 || box.bottom > innerHeight) window.scrollBy({ top: box.top - 80, behavior: "smooth" });
+      const mine = rowAt(me.code, b.self);
+      const off = me.code.clientHeight / 2 - mine.offsetHeight / 2;
+      mine.classList.add("here");
+      const at = park(me.code, mine, off);
+      if (b.was) for (let n = b.was[0]; n <= b.was[1]; n++) rowAt(ref.code, n).classList.add("was");
+      const theirs = rowAt(ref.code, b.ref);
+      theirs.classList.add("here");
+      park(ref.code, theirs, b.added ? at - theirs.offsetHeight : at);   // added lines: the line before them sits just above
+      for (const c of shown) if (c !== me && c !== ref) park(c.code, rowAt(c.code, placeOf(c.cell.marks, b.ref)), at);
+    };
+    cols.replaceChildren(...all.map(col => {
+      const { v, cell } = col;
+      const code = col.code || $("div", { class: "empty" }, "Not in this version.");
+      const step = cell && cell.marks ? stepper(blocks(cell.marks), land(col)) : null;
       const ref = v.id === piece.ref ? " · the others are highlighted against this one" : cell && cell.marks ? ` · highlighted against ${piece.ref}` : "";
-      return $("section", { class: "sheet col" },
+      return $("section", { class: v.id === piece.ref ? "sheet col refcol" : "sheet col" },
         $("div", { class: "sheethead" },
           $("div", { class: "who" }, v.label === v.id ? v.id : `${v.id} · ${v.label}`),
           $("div", { class: "path" }, cell ? cell.path : "—"),
@@ -709,7 +757,7 @@ function compareView() {
   };
   render();
   return [$("div", { class: "vhead" }, $("h2", {}, "Side by side"),
-    $("p", {}, "Files that two or more versions share, where they differ. Files with the same name and kind line up even when the extension differs (.cc and .cpp). Scroll sideways for more columns. In each column, highlighted lines differ from the reference column, and a red rule marks where lines were taken out.")), bar, cols];
+    $("p", {}, "Files that two or more versions share, where they differ. Files with the same name and kind line up even when the extension differs (.cc and .cpp). Scroll sideways for more columns. In each column, highlighted lines differ from the reference column, and a red rule marks where lines were taken out. Stepping through one column's changes brings the other columns to the same lines, and marks in red the reference lines that were replaced or taken out.")), bar, cols];
 }
 
 // ---- tabs ------------------------------------------------------------------------
