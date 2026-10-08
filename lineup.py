@@ -8,6 +8,8 @@ file drawer and highlighted code, a side-by-side view of files that the
 versions share, and optional Markdown pages and extra file shelves. A version
 can be marked as derived from a base version; it then gets "changes from
 base" diffs per file and, when both are refs in one git repo, its commits.
+Whole files and side-by-side columns highlight the lines that changed, with
+buttons that step from one change to the next.
 
 The output is one self-contained HTML file. It loads highlight.js from
 cdnjs; everything else is inline. Python 3.8+, standard library only. If the
@@ -207,6 +209,18 @@ def unified(a, b, path):
     return "".join(difflib.unified_diff(a.splitlines(True), b.splitlines(True), f"a/{path}", f"b/{path}", n=3))
 
 
+def marks(old, new):
+    """The lines of new that differ from old, and the places where old lines were taken out."""
+    a, b = old.splitlines(), new.splitlines()
+    changed, gone = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag in ("replace", "insert"):
+            changed.extend(range(j1 + 1, j2 + 1))
+        elif tag == "delete":
+            gone.append(j1)   # taken out after line j1 of new (0: before its first line)
+    return {"changed": changed, "gone": gone}
+
+
 def commits(base, src):
     if not (base.repo and src.repo and os.path.realpath(base.repo) == os.path.realpath(src.repo)):
         return None
@@ -245,6 +259,7 @@ def build(args):
                     f["changed"], f["diff"] = True, unified("", f["text"], f["path"])
                 elif old["text"] != f["text"]:
                     f["changed"], f["diff"] = True, unified(old["text"], f["text"], f["path"])
+                    f["marks"] = marks(old["text"], f["text"])
             v["derived"] = True
             v["commits"] = commits(sources[args.base], src)
         versions.append(v)
@@ -258,7 +273,9 @@ def build(args):
     for k in order(shared):
         cells = shared[k]
         if len(cells) >= 2 and len({c["text"] for c in cells.values()}) > 1:
-            compare.append({"name": k, "cells": cells})
+            ref = args.base if args.base in cells else next(v["id"] for v in versions if v["id"] in cells)
+            cells = {n: dict(c, marks=marks(cells[ref]["text"], c["text"])) if n != ref else c for n, c in cells.items()}
+            compare.append({"name": k, "cells": cells, "ref": ref})
     compare.sort(key=lambda c: -len(c["cells"]))   # most widely shared first (stable, so paths stay in order)
 
     pages = []
@@ -327,7 +344,7 @@ TEMPLATE = r"""<title>{{TITLE}}</title>
 :root {
   --bg: #f3f4f6; --sheet: #ffffff; --fg: #1c2230; --muted: #5b6475; --line: #d9dde4;
   --brown: #6b3f22; --cobalt: #1f4fa8; --red: #b3202a;
-  --add-bg: #e6edfb; --del-bg: #fbe8e9; --hunk: #6b3f22; --code-bg: #fafbfc;
+  --add-bg: #e6edfb; --del-bg: #fbe8e9; --hunk: #6b3f22; --code-bg: #fafbfc; --mark-bg: #d3e0fa;
   --kw: #1f4fa8; --str: #8a5a12; --com: #6f7787; --num: #9a2f7a; --ty: #11706b; --pre: #6b3f22;
   --display: "Spectral", Georgia, "Times New Roman", serif;
   --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
@@ -336,13 +353,13 @@ TEMPLATE = r"""<title>{{TITLE}}</title>
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #14161b; --sheet: #1c1f26; --fg: #e3e6ec; --muted: #9aa2b1; --line: #2e333d;
   --brown: #d19a6e; --cobalt: #86a9f2; --red: #f07b7f;
-  --add-bg: #1d2a45; --del-bg: #3d1f23; --hunk: #d19a6e; --code-bg: #181b21;
+  --add-bg: #1d2a45; --del-bg: #3d1f23; --hunk: #d19a6e; --code-bg: #181b21; --mark-bg: #263a63;
   --kw: #86a9f2; --str: #e0b36a; --com: #7f8897; --num: #e08cc9; --ty: #5fc7bd; --pre: #d19a6e;
   color-scheme: dark } }
 :root[data-theme="dark"] {
   --bg: #14161b; --sheet: #1c1f26; --fg: #e3e6ec; --muted: #9aa2b1; --line: #2e333d;
   --brown: #d19a6e; --cobalt: #86a9f2; --red: #f07b7f;
-  --add-bg: #1d2a45; --del-bg: #3d1f23; --hunk: #d19a6e; --code-bg: #181b21;
+  --add-bg: #1d2a45; --del-bg: #3d1f23; --hunk: #d19a6e; --code-bg: #181b21; --mark-bg: #263a63;
   --kw: #86a9f2; --str: #e0b36a; --com: #7f8897; --num: #e08cc9; --ty: #5fc7bd; --pre: #d19a6e;
   color-scheme: dark }
 
@@ -383,7 +400,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--cobalt); outlin
 .subtabs, .comparebar { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { font: inherit; font-size: 0.85rem; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--sheet); color: var(--fg); cursor: pointer; }
 .chip[aria-pressed="true"] { border-color: var(--cobalt); color: var(--cobalt); font-weight: 700; }
-.comparebar .chip { font-family: var(--mono); font-size: 0.8rem; }
+.comparebar .chip { font-family: var(--mono); font-size: 0.8rem; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 
 .bench { display: grid; grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr); gap: 14px; align-items: start; }
 .drawer { background: var(--sheet); border: 1px solid var(--line); border-radius: 8px; padding: 6px; display: grid; gap: 2px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 52px); max-height: calc(100vh - 80px); overflow-y: auto; }
@@ -408,6 +425,14 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--cobalt); outlin
 .code tr.add td.c { background: var(--add-bg); }
 .code tr.del td.c { background: var(--del-bg); }
 .code tr.add td.n::after { content: " +"; color: var(--cobalt); }
+.code tr.add td.n, .code tr.chg td.n { box-shadow: inset 4px 0 0 var(--cobalt); color: var(--cobalt); font-weight: 700; }
+.code tr.del td.n { box-shadow: inset 4px 0 0 var(--red); color: var(--red); font-weight: 700; }
+.code tr.chg td.c { background: var(--mark-bg); }
+.code tr.gone-after td { box-shadow: inset 0 -2px 0 var(--red); }
+.code tr.gone-before td { box-shadow: inset 0 2px 0 var(--red); }
+.code tr.chg.gone-after td.n, .code tr.chg.gone-before td.n { box-shadow: inset 4px 0 0 var(--cobalt), inset 0 -2px 0 var(--red); }
+.code tr.here td { outline: 2px solid var(--cobalt); outline-offset: -2px; }
+.stops { color: var(--cobalt); font-weight: 600; }
 .code tr.del td.n::after { content: " \2212"; color: var(--red); }
 .code tr.hunk td { color: var(--hunk); background: var(--sheet); font-style: italic; padding-top: 4px; padding-bottom: 4px; }
 .code tr.metaline td { color: var(--brown); background: var(--sheet); font-weight: 600; padding-top: 8px; }
@@ -500,11 +525,43 @@ function splitLines(htmlText) {
   }
   return out;
 }
-function codeTable(text, lang) {
+// a whole file; with marks, the changed lines are highlighted and a red rule shows where lines were taken out
+function codeTable(text, lang, mk) {
+  const changed = new Set(mk ? mk.changed : []), gone = new Set(mk ? mk.gone : []);
   const tb = $("tbody");
-  splitLines(highlighted(text.replace(/\n$/, ""), lang)).forEach((l, i) =>
-    tb.append($("tr", {}, $("td", { class: "n" }, String(i + 1)), $("td", { class: "c", html: l || " " }))));
+  splitLines(highlighted(text.replace(/\n$/, ""), lang)).forEach((l, i) => {
+    const n = i + 1, cls = [];
+    if (changed.has(n)) cls.push("chg");
+    if (gone.has(n)) cls.push("gone-after");
+    if (n === 1 && gone.has(0)) cls.push("gone-before");
+    tb.append($("tr", { class: cls.join(" ") }, $("td", { class: "n" }, String(n)), $("td", { class: "c", html: l || " " })));
+  });
   return $("div", { class: "code" }, $("table", {}, tb));
+}
+// the first row of each change: a run of highlighted lines, or a place where lines were taken out
+function stops(box) {
+  const rows = [...box.querySelectorAll("tr")], out = [];
+  rows.forEach((r, i) => {
+    const chg = r.classList.contains("chg"), prev = i > 0 && rows[i - 1].classList.contains("chg");
+    if ((chg && !prev) || r.classList.contains("gone-before") || (r.classList.contains("gone-after") && !chg)) out.push(r);
+  });
+  return out;
+}
+// "3 changes", and buttons that step through them
+function stepper(box) {
+  const list = stops(box);
+  if (!list.length) return null;
+  let at = -1;
+  const go = d => {
+    list.forEach(r => r.classList.remove("here"));
+    at = (at + d + list.length) % list.length;
+    list[at].classList.add("here");
+    list[at].scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  return $("span", { class: "tools" },
+    $("span", { class: "stops" }, list.length === 1 ? "1 change" : `${list.length} changes`),
+    $("button", { class: "chip", title: "previous change", onclick: () => go(-1) }, "↑"),
+    $("button", { class: "chip", title: "next change", onclick: () => go(1) }, "↓ next"));
 }
 function diffTable(diff, lang) {
   const tb = $("tbody");
@@ -544,12 +601,14 @@ function sheet(file, startMode) {
         tools.append($("button", { class: "chip", "aria-pressed": String(mode === m), onclick: () => { mode = m; render(); } }, label));
       }
     }
+    const code = mode === "diff" && file.diff ? diffTable(file.diff, file.lang) : codeTable(file.text, file.lang, file.marks);
+    if (mode !== "diff") { const s = stepper(code); if (s) tools.prepend(s); }
     box.replaceChildren(
       $("div", { class: "sheethead" },
         $("div", {}, $("div", { class: "path" }, file.path),
-          $("div", { class: "meta" }, `${lineCount(file.text)} lines${file.changed ? " · changed from " + D.base : ""}`)),
+          $("div", { class: "meta" }, `${lineCount(file.text)} lines${file.changed ? " · changed from " + D.base : ""}${file.marks && mode !== "diff" ? " · highlighted" : ""}`)),
         tools),
-      mode === "diff" && file.diff ? diffTable(file.diff, file.lang) : codeTable(file.text, file.lang));
+      code);
   };
   render();
   return box;
@@ -636,17 +695,21 @@ function compareView() {
     const piece = D.compare.find(c => c.name === pick);
     cols.replaceChildren(...D.versions.map(v => {
       const cell = piece.cells[v.id];
+      const code = cell ? codeTable(cell.text, cell.lang, cell.marks) : $("div", { class: "empty" }, "Not in this version.");
+      const step = cell && cell.marks ? stepper(code) : null;
+      const ref = v.id === piece.ref ? " · the others are highlighted against this one" : cell && cell.marks ? ` · highlighted against ${piece.ref}` : "";
       return $("section", { class: "sheet col" },
         $("div", { class: "sheethead" },
           $("div", { class: "who" }, v.label === v.id ? v.id : `${v.id} · ${v.label}`),
           $("div", { class: "path" }, cell ? cell.path : "—"),
-          $("div", { class: "meta" }, cell ? `${lineCount(cell.text)} lines` : "")),
-        cell ? codeTable(cell.text, cell.lang) : $("div", { class: "empty" }, "Not in this version."));
+          $("div", { class: "meta" }, cell ? `${lineCount(cell.text)} lines${ref}` : ""),
+          step),
+        code);
     }));
   };
   render();
   return [$("div", { class: "vhead" }, $("h2", {}, "Side by side"),
-    $("p", {}, "Files that two or more versions share, where they differ. Files with the same name and kind line up even when the extension differs (.cc and .cpp). Scroll sideways for more columns.")), bar, cols];
+    $("p", {}, "Files that two or more versions share, where they differ. Files with the same name and kind line up even when the extension differs (.cc and .cpp). Scroll sideways for more columns. In each column, highlighted lines differ from the reference column, and a red rule marks where lines were taken out.")), bar, cols];
 }
 
 // ---- tabs ------------------------------------------------------------------------
